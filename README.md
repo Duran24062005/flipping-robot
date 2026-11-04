@@ -39,13 +39,13 @@ Si MuJoCo no encuentra GLFW en Linux, instale los paquetes de desarrollo de GLFW
 Entrenamiento corto para verificar el flujo:
 
 ```bash
-python scripts/train.py --steps 20000 --checkpoint checkpoints/robot.pt
+python scripts/train.py --steps 20000
 ```
 
 Entrenamiento más largo:
 
 ```bash
-python scripts/train.py --steps 2000000 --checkpoint checkpoints/robot.pt
+python scripts/train.py --steps 2000000
 ```
 
 Entrenar viendo el movimiento en tiempo real:
@@ -65,18 +65,22 @@ Cerrar la ventana gráfica desactiva el render y deja que PPO continúe en modo 
 Reproducir la política guardada:
 
 ```bash
-python scripts/play.py --checkpoint checkpoints/robot.pt
+python scripts/play.py
 ```
 
-El archivo `robot.pt` contiene pesos de política, dimensiones, semilla, pasos, retornos por episodio y límite de torque. Las observaciones no se normalizan. PPO explora con una distribución Normal acotada mediante tanh durante el entrenamiento; la reproducción usa la media de esa distribución. Una voltereta estable no está garantizada por una ejecución corta y puede requerir más pasos o ajustes de recompensa.
+El nuevo modelo tiene 27 motores y produce observaciones de 67 valores. El checkpoint previo de 8 motores (`checkpoints/robot.pt`) no es compatible. La política nueva se guarda por defecto en `checkpoints/robot-humanoid-v2.pt`; entrena de nuevo antes de reproducirla. Cada checkpoint contiene pesos, dimensiones, semilla, pasos, retornos por episodio y límite de torque. Las observaciones no se normalizan. Una voltereta estable no está garantizada por una ejecución corta.
 
 ## Diseño
 
-- `assets/humanoid.xml`: torso, brazos, piernas, articulaciones, suelo y motores.
+- `assets/humanoid.xml`: pelvis, cintura y torso articulados, cabeza, brazos con hombros/codos/muñecas, piernas con caderas/rodillas/tobillos, pies elipsoidales y 27 motores.
 - `cpp/robot_env.cpp`: simulación MuJoCo y ABI C pequeña consumida por `ctypes`.
 - `scripts/env.py`: adaptador Python/ctypes con validación de forma, valores finitos, orden de reset y ciclo de vida.
 - `scripts/train.py`: PPO continuo implementado con PyTorch; guarda checkpoint y estadísticas.
 - `scripts/visualizer.py`: copia visual sincronizada usada por PPO y por la reproducción.
 - `scripts/play.py`: carga un checkpoint y muestra la simulación en una ventana MuJoCo.
 
-El controlador observa `qpos + qvel` (incluyendo pose libre del torso) y aplica torques acotados a ocho motores. La recompensa favorece rotación frontal, mantener altura y terminar cerca de una rotación completa con el torso erguido. Una caída por altura fuera del intervalo permitido, un estado numérico no finito, un aterrizaje reconocido o alcanzar cinco segundos terminan el episodio. El código verifica formas y valores finitos antes y después de cruzar la interfaz C++/Python.
+El controlador observa `qpos + qvel` (67 valores, incluida la pose libre del torso) y aplica torques acotados a 27 motores. El MJCF utiliza 19,65 kg de masa total distribuida entre pelvis, torso, cabeza y extremidades, con inercia explícita por segmento. Cápsulas, elipsoides y esferas redondean el contorno; los pies elipsoidales llegan al plano del suelo en la pose inicial. Los contactos estructurales entre pelvis, cintura, pecho y hombros se excluyen para evitar penetraciones internas. La recompensa favorece rotación frontal, mantener altura y terminar cerca de una rotación completa con el torso erguido. Una caída por altura fuera del intervalo permitido, un estado numérico no finito, un aterrizaje reconocido o alcanzar cinco segundos terminan el episodio. El código verifica formas y valores finitos antes y después de cruzar la interfaz C++/Python.
+
+Vista renderizada desde el MJCF inicial:
+
+![Humanoide minimalista en la pose inicial](docs/humanoid-preview.png)
