@@ -1,10 +1,16 @@
-"""PPO continuous-control trainer implemented with PyTorch."""
+"""Entrena la política de control continuo usando PPO y PyTorch.
+
+Conecta ``RobotEnv`` (Python/ctypes -> C++/MuJoCo) con la red ActorCritic.
+Cada iteración recoge transiciones, calcula GAE, actualiza actor y crítico,
+y sustituye el checkpoint de forma atómica para conservar el último modelo.
+"""
 from __future__ import annotations
 
 import argparse
 import math
+import os
 import random
-import sys
+import tempfile
 from pathlib import Path
 
 import numpy as np
@@ -14,98 +20,227 @@ from torch.distributions import Normal
 
 from env import ROOT, RobotEnv
 
+TORQUE_LIMIT = 45.0  # Debe coincidir con ctrlrange del modelo y el límite C++.
+
 
 class ActorCritic(nn.Module):
+    """Red actor-crítico: produce torques y estima el retorno futuro.
+
+    El actor muestrea una Normal en espacio latente; tanh limita la acción a
+    ±TORQUE_LIMIT. Se conserva la muestra latente en el rollout para que PPO
+    evalúe exactamente la misma densidad que usó al tomar cada acción.
+    """
+
     def __init__(self, obs_size: int, action_size: int):
         super().__init__()
-        def mlp(out: int) -> nn.Sequential:
-            return nn.Sequential(nn.Linear(obs_size, 128), nn.Tanh(), nn.Linear(128, 128), nn.Tanh(), nn.Linear(128, out))
+
+        def mlp(output_size: int) -> nn.Sequential:
+            """Red MLP compacta compartida en forma, no en pesos."""
+            return nn.Sequential(
+                nn.Linear(obs_size, 128), nn.Tanh(),
+                nn.Linear(128, 128), nn.Tanh(),
+                nn.Linear(128, output_size),
+            )
+
         self.actor = mlp(action_size)
         self.critic = mlp(1)
-        self.log_std = nn.Parameter(torch.full((action_size,), 1.0))
+        # Desviación inicial para explorar torques de magnitud útil.
+        self.log_std = nn.Parameter(torch.ones(action_size))
 
-    def distribution(self, obs: torch.Tensor) -> Normal:
-        mean = self.actor(obs)
-        return Normal(mean, self.log_std.clamp(-2.5, 2.0).exp().expand_as(mean))
+    def distribution(self, observations: torch.Tensor) -> Normal:
+        """Distribución latente con desviación limitada para evitar overflow."""
+        mean = self.actor(observations)
+        std = self.log_std.clamp(-2.5, 2.0).exp().expand_as(mean)
+        return Normal(mean, std)
 
-    def act(self, obs: torch.Tensor, deterministic: bool = False):
-        dist = self.distribution(obs)
-        action = dist.mean if deterministic else dist.sample()
-        return action, dist.log_prob(action).sum(-1), self.critic(obs).squeeze(-1)
+    def act(self, observations: torch.Tensor, deterministic: bool = False):
+        """Devuelve torques acotados, log-probabilidad latente y valor V(s)."""
+        distribution = self.distribution(observations)
+        latent = distribution.mean if deterministic else distribution.sample()
+        torques = torch.tanh(latent) * TORQUE_LIMIT
+        log_probability = distribution.log_prob(latent).sum(-1)
+        value = self.critic(observations).squeeze(-1)
+        return torques, log_probability, value, latent
+
+
+def save_checkpoint(path: Path, payload: dict) -> None:
+    """Escribe primero un temporal y reemplaza el checkpoint sin dejarlo parcial."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temp_name = None
+    try:
+        with tempfile.NamedTemporaryFile(dir=path.parent, suffix=".tmp", delete=False) as temp:
+            temp_name = temp.name
+        torch.save(payload, temp_name)
+        os.replace(temp_name, path)
+    finally:
+        if temp_name and os.path.exists(temp_name):
+            os.unlink(temp_name)
+
+
+def parse_args() -> argparse.Namespace:
+    """Lee opciones y rechaza configuraciones inválidas antes de inicializar."""
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--steps", type=int, default=500_000,
+                        help="número total de acciones simuladas (predeterminado: 500000)")
+    parser.add_argument("--checkpoint", type=Path,
+                        default=ROOT / "checkpoints" / "robot.pt")
+    parser.add_argument("--seed", type=int, default=7)
+    parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu",
+                        help="dispositivo torch; por ejemplo cpu o cuda")
+    args = parser.parse_args()
+    if args.steps <= 0:
+        parser.error("--steps debe ser un entero mayor que cero")
+    if args.seed < 0:
+        parser.error("--seed no puede ser negativo")
+    if args.device.startswith("cuda") and not torch.cuda.is_available():
+        parser.error("se pidió CUDA, pero torch.cuda.is_available() es falso")
+    try:
+        device = torch.device(args.device)
+    except (RuntimeError, ValueError) as error:
+        parser.error(f"dispositivo inválido: {error}")
+    if device.type == "cuda":
+        if not torch.cuda.is_available():
+            parser.error("CUDA no está disponible en esta instalación de PyTorch")
+        if device.index is not None and device.index >= torch.cuda.device_count():
+            parser.error(f"no existe el dispositivo CUDA {device.index}")
+    return args
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--steps", type=int, default=500_000)
-    parser.add_argument("--checkpoint", type=Path, default=ROOT / "checkpoints" / "robot.pt")
-    parser.add_argument("--seed", type=int, default=7)
-    parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
-    args = parser.parse_args()
-    random.seed(args.seed); np.random.seed(args.seed); torch.manual_seed(args.seed)
+    """Ejecuta PPO hasta alcanzar el presupuesto de pasos solicitado."""
+    args = parse_args()
+    # Mantiene repetible la inicialización y el orden de minibatches para una
+    # misma versión de librerías y el mismo dispositivo.
+    random.seed(args.seed)
+    np.random.seed(args.seed)
+    torch.manual_seed(args.seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(args.seed)
     device = torch.device(args.device)
+
+    # Parámetros estándar de PPO para un controlador continuo de tamaño pequeño.
+    horizon, epochs, minibatch = 1024, 8, 256
+    gamma, gae_lambda = 0.99, 0.95
+    episode_returns: list[float] = []
+
     with RobotEnv() as env:
         obs_size, action_size = env.obs_size, env.action_size
-        agent = ActorCritic(obs_size, action_size).to(device)
-        optimizer = torch.optim.Adam(agent.parameters(), lr=3e-4)
-        obs = env.reset()
-        total_steps, episode_return, episode_len = 0, 0.0, 0
-        returns: list[float] = []
-        horizon, epochs, minibatch = 1024, 8, 256
+        policy = ActorCritic(obs_size, action_size).to(device)
+        optimizer = torch.optim.Adam(policy.parameters(), lr=3e-4)
+        observation = env.reset()
+        total_steps = 0
+        episode_return = 0.0
+        episode_length = 0
+
         while total_steps < args.steps:
-            n = min(horizon, args.steps - total_steps)
-            observations = np.zeros((n, obs_size), np.float32)
-            actions = np.zeros((n, action_size), np.float32)
-            log_probs = np.zeros(n, np.float32); rewards = np.zeros(n, np.float32)
-            dones = np.zeros(n, np.float32); values = np.zeros(n, np.float32)
-            for t in range(n):
-                observations[t] = obs
+            # Buffer de una trayectoria parcial; arrays NumPy evitan mantener
+            # el grafo autograd durante la fase de recolección.
+            count = min(horizon, args.steps - total_steps)
+            observations = np.empty((count, obs_size), dtype=np.float32)
+            latent_actions = np.empty((count, action_size), dtype=np.float32)
+            log_probabilities = np.empty(count, dtype=np.float32)
+            rewards = np.empty(count, dtype=np.float32)
+            dones = np.empty(count, dtype=np.float32)
+            values = np.empty(count, dtype=np.float32)
+
+            for index in range(count):
+                observations[index] = observation
+                state_tensor = torch.as_tensor(observation, device=device)
                 with torch.no_grad():
-                    action, logp, value = agent.act(torch.as_tensor(obs, device=device))
-                raw_action = action.cpu().numpy()
-                actions[t], log_probs[t], values[t] = raw_action, logp.item(), value.item()
-                obs, rewards[t], ended, _ = env.step(raw_action)
-                dones[t] = float(ended)
-                total_steps += 1; episode_return += float(rewards[t]); episode_len += 1
+                    torque, log_probability, value, latent = policy.act(state_tensor)
+                latent_np = latent.cpu().numpy()
+                torque_np = torque.cpu().numpy()
+                if not np.isfinite(torque_np).all() or not np.isfinite(value.item()):
+                    raise FloatingPointError("La política produjo una acción o valor no finito.")
+                latent_actions[index] = latent_np
+                log_probabilities[index] = log_probability.item()
+                values[index] = value.item()
+
+                observation, reward, ended, _info = env.step(torque_np)
+                if not np.isfinite(reward):
+                    raise FloatingPointError("El entorno devolvió una recompensa no finita.")
+                rewards[index] = reward
+                dones[index] = float(ended)
+                total_steps += 1
+                episode_return += reward
+                episode_length += 1
                 if ended:
-                    returns.append(episode_return)
-                    print(f"pasos={total_steps} episodio={len(returns)} retorno={episode_return:.1f} longitud={episode_len}", flush=True)
-                    obs, episode_return, episode_len = env.reset(), 0.0, 0
+                    episode_returns.append(episode_return)
+                    print(
+                        f"pasos={total_steps} episodio={len(episode_returns)} "
+                        f"retorno={episode_return:.1f} longitud={episode_length}",
+                        flush=True,
+                    )
+                    observation = env.reset()
+                    episode_return, episode_length = 0.0, 0
+
+            # GAE calcula ventajas descontadas; done enmascara el valor del
+            # episodio siguiente para no propagar retorno a través de reset.
             with torch.no_grad():
-                next_value = agent.critic(torch.as_tensor(obs, device=device)).item()
-            advantages = np.zeros(n, np.float32); last_gae = 0.0
-            for t in reversed(range(n)):
-                next_nonterminal = 1.0 - dones[t]
-                next_val = next_value if t == n - 1 else values[t + 1]
-                last_gae = rewards[t] + 0.99 * next_val * next_nonterminal - values[t] + 0.99 * 0.95 * next_nonterminal * last_gae
-                advantages[t] = last_gae
-            returns_t = advantages + values
-            obs_t = torch.as_tensor(observations, device=device)
-            act_t = torch.as_tensor(actions, device=device)
-            old_logp_t = torch.as_tensor(log_probs, device=device)
-            adv_t = torch.as_tensor(advantages, device=device)
-            ret_t = torch.as_tensor(returns_t, device=device)
-            adv_t = (adv_t - adv_t.mean()) / (adv_t.std() + 1e-8)
-            indices = np.arange(n)
-            for _ in range(epochs):
+                next_value = policy.critic(
+                    torch.as_tensor(observation, device=device)
+                ).item()
+            advantages = np.zeros(count, dtype=np.float32)
+            last_advantage = 0.0
+            for index in reversed(range(count)):
+                nonterminal = 1.0 - dones[index]
+                next_v = next_value if index == count - 1 else values[index + 1]
+                delta = rewards[index] + gamma * next_v * nonterminal - values[index]
+                last_advantage = delta + gamma * gae_lambda * nonterminal * last_advantage
+                advantages[index] = last_advantage
+            value_targets = advantages + values
+
+            # Convierte el lote a tensores una vez y baraja sus índices por época.
+            obs_tensor = torch.as_tensor(observations, device=device)
+            latent_tensor = torch.as_tensor(latent_actions, device=device)
+            old_logp_tensor = torch.as_tensor(log_probabilities, device=device)
+            advantage_tensor = torch.as_tensor(advantages, device=device)
+            target_tensor = torch.as_tensor(value_targets, device=device)
+            advantage_tensor = (advantage_tensor - advantage_tensor.mean()) / (
+                advantage_tensor.std(unbiased=False) + 1e-8
+            )
+            indices = np.arange(count)
+
+            for _epoch in range(epochs):
                 np.random.shuffle(indices)
-                for start in range(0, n, minibatch):
-                    idx = torch.as_tensor(indices[start:start + minibatch], device=device)
-                    dist = agent.distribution(obs_t[idx])
-                    new_logp = dist.log_prob(act_t[idx]).sum(-1)
-                    ratio = (new_logp - old_logp_t[idx]).exp()
-                    policy_loss = -torch.minimum(ratio * adv_t[idx], torch.clamp(ratio, 0.8, 1.2) * adv_t[idx]).mean()
-                    value_loss = 0.5 * (agent.critic(obs_t[idx]).squeeze(-1) - ret_t[idx]).square().mean()
-                    entropy = dist.entropy().sum(-1).mean()
+                for start in range(0, count, minibatch):
+                    batch = torch.as_tensor(indices[start:start + minibatch], device=device)
+                    distribution = policy.distribution(obs_tensor[batch])
+                    new_logp = distribution.log_prob(latent_tensor[batch]).sum(-1)
+                    ratio = (new_logp - old_logp_tensor[batch]).exp()
+                    unclipped = ratio * advantage_tensor[batch]
+                    clipped = ratio.clamp(0.8, 1.2) * advantage_tensor[batch]
+                    policy_loss = -torch.minimum(unclipped, clipped).mean()
+                    predicted_value = policy.critic(obs_tensor[batch]).squeeze(-1)
+                    value_loss = 0.5 * (predicted_value - target_tensor[batch]).square().mean()
+                    entropy = distribution.entropy().sum(-1).mean()
                     loss = policy_loss + 0.5 * value_loss - 0.01 * entropy
-                    optimizer.zero_grad(); loss.backward()
-                    nn.utils.clip_grad_norm_(agent.parameters(), 0.5)
+                    if not torch.isfinite(loss):
+                        raise FloatingPointError("La pérdida PPO no es finita; se detuvo el entrenamiento.")
+                    optimizer.zero_grad(set_to_none=True)
+                    loss.backward()
+                    nn.utils.clip_grad_norm_(policy.parameters(), max_norm=0.5,
+                                             error_if_nonfinite=True)
                     optimizer.step()
-            mean_return = float(np.mean(returns[-20:])) if returns else math.nan
-            print(f"actualización pasos={total_steps}/{args.steps} retorno_medio_20={mean_return:.2f}", flush=True)
-            args.checkpoint.parent.mkdir(parents=True, exist_ok=True)
-            torch.save({"model": agent.state_dict(), "obs_size": obs_size, "action_size": action_size,
-                        "seed": args.seed, "steps": total_steps, "algorithm": "PPO",
-                        "episode_returns": returns}, args.checkpoint)
+
+            mean_return = float(np.mean(episode_returns[-20:])) if episode_returns else math.nan
+            print(
+                f"actualización pasos={total_steps}/{args.steps} "
+                f"retorno_medio_20={mean_return:.2f}", flush=True,
+            )
+            # El checkpoint se puede abrir directamente desde play.py. El
+            # reemplazo atómico evita archivos incompletos ante una interrupción.
+            save_checkpoint(args.checkpoint, {
+                "model": policy.state_dict(),
+                "obs_size": obs_size,
+                "action_size": action_size,
+                "seed": args.seed,
+                "steps": total_steps,
+                "algorithm": "PPO",
+                "episode_returns": episode_returns,
+                "torque_limit": TORQUE_LIMIT,
+            })
+
     print(f"Checkpoint guardado en {args.checkpoint}")
     return 0
 
