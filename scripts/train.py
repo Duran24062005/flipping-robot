@@ -7,6 +7,7 @@ y sustituye el checkpoint de forma atómica para conservar el último modelo.
 from __future__ import annotations
 
 import argparse
+from contextlib import ExitStack
 import math
 import os
 import random
@@ -18,9 +19,8 @@ import torch
 from torch import nn
 from torch.distributions import Normal
 
+from config import TORQUE_LIMIT
 from env import ROOT, RobotEnv
-
-TORQUE_LIMIT = 45.0  # Debe coincidir con ctrlrange del modelo y el límite C++.
 
 
 class ActorCritic(nn.Module):
@@ -87,11 +87,21 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--seed", type=int, default=7)
     parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu",
                         help="dispositivo torch; por ejemplo cpu o cuda")
+    parser.add_argument("--render", action="store_true",
+                        help="abre el visor MuJoCo mientras PPO entrena")
+    parser.add_argument("--render-every", type=int, default=1,
+                        help="actualiza la ventana cada N acciones (física sigue cada acción)")
+    parser.add_argument("--realtime", action="store_true",
+                        help="espera el tiempo de simulación entre acciones; requiere --render")
     args = parser.parse_args()
     if args.steps <= 0:
         parser.error("--steps debe ser un entero mayor que cero")
     if args.seed < 0:
         parser.error("--seed no puede ser negativo")
+    if args.render_every < 1:
+        parser.error("--render-every debe ser un entero mayor que cero")
+    if args.realtime and not args.render:
+        parser.error("--realtime requiere --render")
     if args.device.startswith("cuda") and not torch.cuda.is_available():
         parser.error("se pidió CUDA, pero torch.cuda.is_available() es falso")
     try:
@@ -123,11 +133,21 @@ def main() -> int:
     gamma, gae_lambda = 0.99, 0.95
     episode_returns: list[float] = []
 
-    with RobotEnv() as env:
+    with RobotEnv() as env, ExitStack() as resources:
         obs_size, action_size = env.obs_size, env.action_size
+        visualizer = None
+        if args.render:
+            # Import diferido: el modo headless no inicializa glfw ni el visor.
+            from visualizer import SynchronizedViewer
+
+            visualizer = resources.enter_context(SynchronizedViewer(
+                env, render_every=args.render_every, realtime=args.realtime
+            ))
         policy = ActorCritic(obs_size, action_size).to(device)
         optimizer = torch.optim.Adam(policy.parameters(), lr=3e-4)
         observation = env.reset()
+        if visualizer is not None:
+            visualizer.reset(observation)
         total_steps = 0
         episode_return = 0.0
         episode_length = 0
@@ -157,6 +177,13 @@ def main() -> int:
                 values[index] = value.item()
 
                 observation, reward, ended, _info = env.step(torque_np)
+                if visualizer is not None:
+                    if visualizer.is_running():
+                        visualizer.advance(torque_np)
+                    else:
+                        print("Visor cerrado; PPO continúa en modo headless.", flush=True)
+                        visualizer.close()
+                        visualizer = None
                 if not np.isfinite(reward):
                     raise FloatingPointError("El entorno devolvió una recompensa no finita.")
                 rewards[index] = reward
@@ -172,6 +199,8 @@ def main() -> int:
                         flush=True,
                     )
                     observation = env.reset()
+                    if visualizer is not None:
+                        visualizer.reset(observation)
                     episode_return, episode_length = 0.0, 0
 
             # GAE calcula ventajas descontadas; done enmascara el valor del

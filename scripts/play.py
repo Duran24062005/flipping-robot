@@ -6,16 +6,13 @@ recibe la política y una instancia Python de MuJoCo dibuja las mismas acciones.
 from __future__ import annotations
 
 import argparse
-import time
 from pathlib import Path
 
-import mujoco
-import mujoco.viewer
-import numpy as np
 import torch
 
 from env import ROOT, RobotEnv
-from train import ActorCritic, TORQUE_LIMIT
+from visualizer import SynchronizedViewer
+from train import ActorCritic
 
 
 def parse_args() -> argparse.Namespace:
@@ -55,22 +52,16 @@ def main() -> int:
         raise SystemExit(f"Pesos incompatibles con esta arquitectura: {error}") from error
     policy.eval()
 
-    model = mujoco.MjModel.from_xml_path(str(ROOT / "assets" / "humanoid.xml"))
-    if model.nu != int(checkpoint["action_size"]):
-        raise SystemExit("El número de actuadores no coincide con el checkpoint.")
-    data = mujoco.MjData(model)
-    # env y viewer mantienen el mismo estado: reset copia la observación inicial
-    # al visor; en cada paso se aplican iguales controles y cantidad de subpasos.
-    with RobotEnv() as env, mujoco.viewer.launch_passive(model, data) as viewer:
-        frame_skip = max(1, round(env.dt / model.opt.timestep))
+    # El mismo espejo visual se comparte con el entrenamiento para que ambos
+    # caminos apliquen torques y subpasos con idéntica lógica.
+    with RobotEnv() as env, SynchronizedViewer(env, realtime=True) as viewer:
         if env.obs_size != int(checkpoint["obs_size"]):
             raise SystemExit("El tamaño de observación del modelo no coincide con el checkpoint.")
+        if env.action_size != int(checkpoint["action_size"]):
+            raise SystemExit("El número de actuadores no coincide con el checkpoint.")
         for episode in range(args.episodes):
             observation = env.reset()
-            mujoco.mj_resetData(model, data)
-            data.qpos[:] = observation[:model.nq]
-            data.qvel[:] = observation[model.nq:]
-            mujoco.mj_forward(model, data)
+            viewer.reset(observation)
             done, score = False, 0.0
 
             while viewer.is_running() and not done:
@@ -82,11 +73,7 @@ def main() -> int:
                 action = torque.numpy()
                 observation, reward, done, _info = env.step(action)
                 score += reward
-                data.ctrl[:] = np.clip(action, -TORQUE_LIMIT, TORQUE_LIMIT)
-                for _ in range(frame_skip):
-                    mujoco.mj_step(model, data)
-                viewer.sync()
-                time.sleep(env.dt)
+                viewer.advance(action)
 
             print(f"episodio={episode + 1} retorno={score:.1f}", flush=True)
             if not viewer.is_running():
