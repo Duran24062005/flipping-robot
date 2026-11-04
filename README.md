@@ -2,6 +2,16 @@
 
 Proyecto de simulación y aprendizaje por refuerzo para un humanoide que intenta dar una voltereta frontal y aterrizar de pie. MuJoCo calcula la física; el entorno de control está en C++; PPO y la política usan Python y PyTorch.
 
+## Cómo se conectan las partes
+
+1. `assets/humanoid.xml` define la geometría, masas, juntas, actuadores y suelo.
+2. `cpp/robot_env.cpp` carga ese XML con la API C de MuJoCo. Su ABI C expone reset, paso, dimensiones, tiempo de simulación y errores.
+3. `scripts/env.py` valida entradas/salidas y usa `ctypes` para comunicar NumPy con la biblioteca `build/librobot_env.so`.
+4. `scripts/train.py` obtiene observaciones, produce torques y actualiza una red Actor-Critic mediante PPO; el checkpoint se escribe de forma atómica.
+5. `scripts/play.py` carga el checkpoint y ejecuta dos simulaciones sincronizadas: la C++ que alimenta a la política y otra Python que dibuja el movimiento.
+
+Cada módulo tiene comentarios y docstrings que describen sus responsabilidades y contratos. La guía detalla aquí la secuencia completa de datos.
+
 ## Requisitos
 
 - Linux x86_64, CMake, compilador C++17 y Python 3.11 o 3.12.
@@ -44,14 +54,14 @@ Reproducir la política guardada:
 python scripts/play.py --checkpoint checkpoints/robot.pt
 ```
 
-El archivo `robot.pt` contiene pesos de política, normalización de observaciones y metadatos. PPO es estocástico durante el entrenamiento; la reproducción usa la media de la política. Una voltereta estable no está garantizada por una ejecución corta y puede requerir más pasos o ajustes de recompensa.
+El archivo `robot.pt` contiene pesos de política, dimensiones, semilla, pasos, retornos por episodio y límite de torque. Las observaciones no se normalizan. PPO explora con una distribución Normal acotada mediante tanh durante el entrenamiento; la reproducción usa la media de esa distribución. Una voltereta estable no está garantizada por una ejecución corta y puede requerir más pasos o ajustes de recompensa.
 
 ## Diseño
 
 - `assets/humanoid.xml`: torso, brazos, piernas, articulaciones, suelo y motores.
 - `cpp/robot_env.cpp`: simulación MuJoCo y ABI C pequeña consumida por `ctypes`.
-- `scripts/env.py`: adaptador Gymnasium con reinicio, paso, recompensa y límites del episodio.
+- `scripts/env.py`: adaptador Python/ctypes con validación de forma, valores finitos, orden de reset y ciclo de vida.
 - `scripts/train.py`: PPO continuo implementado con PyTorch; guarda checkpoint y estadísticas.
 - `scripts/play.py`: carga un checkpoint y muestra la simulación en una ventana MuJoCo.
 
-El controlador observa posiciones y velocidades generalizadas (incluyendo la pose libre del torso) y aplica torques a ocho motores. La recompensa favorece rotación frontal, mantener altura y terminar cerca de una rotación completa con el torso erguido. Un contacto o una caída temprana termina el episodio.
+El controlador observa `qpos + qvel` (incluyendo pose libre del torso) y aplica torques acotados a ocho motores. La recompensa favorece rotación frontal, mantener altura y terminar cerca de una rotación completa con el torso erguido. Una caída por altura fuera del intervalo permitido, un estado numérico no finito, un aterrizaje reconocido o alcanzar cinco segundos terminan el episodio. El código verifica formas y valores finitos antes y después de cruzar la interfaz C++/Python.
