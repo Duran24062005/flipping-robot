@@ -96,8 +96,8 @@ int robot_reset(RobotEnv* env, double* observation) {
     return -1;
   }
   mj_resetData(env->model, env->data);
-  // Esta altura deja los pies apenas sobre el suelo según sus dimensiones MJCF.
-  env->data->qpos[2] = 0.75;
+  // mj_resetData restaura qpos0 del MJCF; el archivo de modelo es la fuente
+  // única de verdad para la altura y la pose inicial del robot.
   mj_forward(env->model, env->data);
   env->elapsed_steps = 0;
   env->rotation = 0.0;

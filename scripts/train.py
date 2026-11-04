@@ -19,8 +19,8 @@ import torch
 from torch import nn
 from torch.distributions import Normal
 
-from config import TORQUE_LIMIT
-from env import ROOT, RobotEnv
+from config import DEFAULT_CHECKPOINT, TORQUE_LIMIT
+from env import RobotEnv
 
 
 class ActorCritic(nn.Module):
@@ -83,7 +83,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--steps", type=int, default=500_000,
                         help="número total de acciones simuladas (predeterminado: 500000)")
     parser.add_argument("--checkpoint", type=Path,
-                        default=ROOT / "checkpoints" / "robot.pt")
+                        default=DEFAULT_CHECKPOINT)
     parser.add_argument("--seed", type=int, default=7)
     parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu",
                         help="dispositivo torch; por ejemplo cpu o cuda")

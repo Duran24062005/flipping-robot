@@ -1,64 +1,223 @@
-<mujoco model="humanoide_voltereta">
-  <!-- Ajustes globales de unidades, integrador y paso de física (2 ms). -->
-  <compiler angle="radian" autolimits="true"/>
+<mujoco model="humanoide_minimalista">
+  <!-- Escala métrica, ángulos radianes y dinámica estable para control por torque. -->
+  <compiler angle="radian" autolimits="true" inertiafromgeom="false"/>
   <option timestep="0.002" gravity="0 0 -9.81" integrator="implicitfast" cone="elliptic"/>
-  <size njmax="2000" nconmax="400"/>
+  <size njmax="3000" nconmax="500"/>
+  <asset>
+    <texture name="studio_sky" type="skybox" builtin="gradient"
+             rgb1="0.74 0.82 0.88" rgb2="0.97 0.98 0.99" width="512" height="512"/>
+  </asset>
+
   <default>
-    <!-- Parámetros comunes heredados por bisagras, geometrías y motores. -->
-    <joint damping="1.2" armature="0.02" limited="true" range="-1.8 1.8"/>
-    <geom condim="3" friction="1.1 0.1 0.1" density="650" rgba="0.25 0.55 0.82 1"/>
-    <motor ctrllimited="true" ctrlrange="-45 45"/>
+    <!-- Todas las bisagras tienen damping y armature para amortiguar oscilación. -->
+    <joint damping="1.8" armature="0.025" frictionloss="0.08" limited="true"/>
+    <geom condim="3" density="0" friction="0.9 0.04 0.01" solref="0.008 1" solimp="0.9 0.95 0.001"
+          rgba="0.78 0.81 0.83 1"/>
+    <default class="joint_visual">
+      <!-- Cubiertas esféricas decorativas: no añaden masa ni contacto físico. -->
+      <geom contype="0" conaffinity="0" density="0" rgba="0.32 0.36 0.39 1"/>
+    </default>
+    <default class="accent_visual">
+      <geom contype="0" conaffinity="0" density="0" rgba="0.20 0.62 0.66 1"/>
+    </default>
+    <default class="foot_contact">
+      <geom friction="1.25 0.06 0.015" solref="0.006 1"/>
+    </default>
   </default>
+
   <worldbody>
-    <!-- Iluminación y suelo de contacto sobre el que el robot aterriza. -->
-    <light pos="0 -3 5" dir="0 0 -1" diffuse="0.8 0.8 0.8"/>
-    <geom name="floor" type="plane" size="5 5 0.1" rgba="0.88 0.9 0.92 1" friction="1.2 0.1 0.1"/>
-    <!-- Raíz libre: seis grados de libertad globales y masa del torso/cabeza. -->
-    <body name="torso" pos="0 0 0.75">
+    <light name="key_light" pos="-2 -3 4" dir="0.2 0.3 -1" diffuse="0.82 0.82 0.82"/>
+    <light name="fill_light" pos="2 2 3" dir="-0.4 -0.5 -1" diffuse="0.35 0.35 0.35"/>
+    <geom name="floor" type="plane" size="5 5 0.1" rgba="0.91 0.92 0.93 1"
+          friction="1.25 0.06 0.015"/>
+
+    <!-- Pelvis y raíz libre: C++ conserva qpos[0:7] y qvel[0:6] para su ABI. -->
+    <body name="pelvis" pos="0 0 0.8015">
       <freejoint name="root"/>
-      <geom name="trunk" type="capsule" fromto="0 0 -0.22 0 0 0.22" size="0.12" mass="5" rgba="0.12 0.36 0.67 1"/>
-      <geom name="head" type="sphere" pos="0 0 0.31" size="0.09" mass="0.7" rgba="0.9 0.67 0.48 1"/>
-      <!-- Cada pierna conecta cadera, rodilla, tobillo y pie con bisagras Y. -->
-      <body name="left_thigh" pos="0 0.13 -0.20">
-        <joint name="left_hip" axis="0 1 0" range="-1.8 1.8"/>
-        <geom type="capsule" fromto="0 0 0 0 0 -0.24" size="0.065" mass="1.3"/>
-        <body name="left_shin" pos="0 0 -0.24">
-          <joint name="left_knee" axis="0 1 0" range="-0.1 2.3"/>
-          <geom type="capsule" fromto="0 0 0 0 0 -0.23" size="0.045" mass="0.9" rgba="0.18 0.44 0.75 1"/>
-          <body name="left_foot" pos="0.07 0 -0.23">
-            <joint name="left_ankle" axis="0 1 0" range="-0.8 0.8"/>
-            <geom type="box" pos="0.055 0 -0.025" size="0.12 0.055 0.035" mass="0.35" rgba="0.12 0.36 0.67 1"/>
+      <inertial pos="0 0 0" mass="2.8" diaginertia="0.018 0.022 0.024"/>
+      <geom name="pelvis_shell" type="ellipsoid" size="0.17 0.125 0.115"
+            rgba="0.78 0.81 0.83 1"/>
+
+      <!-- Cintura de tres ejes: giro axial y flexión/inclinación pequeñas. -->
+      <body name="waist" pos="0 0 0.075">
+        <inertial pos="0 0 0.065" mass="1.35" diaginertia="0.0081 0.0105 0.0073"/>
+        <joint name="waist_yaw" axis="0 0 1" range="-0.45 0.45" damping="2.2"/>
+        <joint name="waist_pitch" axis="0 1 0" range="-0.35 0.35" damping="2.4"/>
+        <joint name="waist_roll" axis="1 0 0" range="-0.30 0.30" damping="2.4"/>
+        <geom name="abdomen" type="ellipsoid" pos="0 0 0.065" size="0.135 0.095 0.145"
+              rgba="0.86 0.88 0.89 1"/>
+
+        <!-- Caja torácica ovalada con pitch y roll independientes. -->
+        <body name="chest" pos="0 0 0.255">
+          <inertial pos="0 0 0.075" mass="4.0" diaginertia="0.0138 0.0185 0.0120"/>
+          <joint name="chest_pitch" axis="0 1 0" range="-0.48 0.48" damping="2.2"/>
+          <joint name="chest_roll" axis="1 0 0" range="-0.34 0.34" damping="2.2"/>
+          <geom name="chest_shell" type="ellipsoid" pos="0 0 0.075" size="0.205 0.135 0.225"
+                rgba="0.82 0.85 0.87 1"/>
+
+          <!-- Cuello corto de dos ejes y cabeza elipsoidal con visor discreto. -->
+          <body name="neck" pos="0 0 0.255">
+            <inertial pos="0 0 0.0525" mass="0.34" diaginertia="0.00050 0.00050 0.00035"/>
+            <joint name="neck_yaw" axis="0 0 1" range="-0.55 0.55" damping="0.45" armature="0.008"/>
+            <joint name="neck_pitch" axis="0 1 0" range="-0.42 0.42" damping="0.45" armature="0.008"/>
+            <geom name="neck_link" type="capsule" fromto="0 0 0 0 0 0.105" size="0.046"
+                  rgba="0.66 0.70 0.73 1"/>
+            <body name="head" pos="0 0 0.115">
+              <inertial pos="0 0 0" mass="0.82" diaginertia="0.0038 0.0044 0.0030"/>
+              <geom name="head_shell" type="ellipsoid" size="0.105 0.086 0.125"
+                    rgba="0.88 0.89 0.89 1"/>
+              <geom name="face_visor" class="accent_visual" type="ellipsoid"
+                    pos="0.103 0 0.006" size="0.014 0.047 0.027" rgba="0.20 0.62 0.66 1"/>
+              <geom name="left_eye" class="joint_visual" type="sphere"
+                    pos="0.110 0.027 0.028" size="0.009" rgba="0.22 0.25 0.27 1"/>
+              <geom name="right_eye" class="joint_visual" type="sphere"
+                    pos="0.110 -0.027 0.028" size="0.009" rgba="0.22 0.25 0.27 1"/>
+            </body>
+          </body>
+
+          <!-- Hombros simétricos: pitch y roll; cápsulas superiores y codos visibles. -->
+          <body name="left_upper_arm" pos="0 0.185 0.145">
+            <inertial pos="0 0.0125 -0.1375" mass="0.78" diaginertia="0.0069 0.0069 0.0012"/>
+            <joint name="left_shoulder_pitch" axis="0 1 0" range="-2.1 1.9" damping="1.1"/>
+            <joint name="left_shoulder_roll" axis="1 0 0" range="-1.45 1.45" damping="1.1"/>
+            <geom name="left_shoulder_cap" class="joint_visual" type="ellipsoid"
+                  size="0.092 0.092 0.095"/>
+            <geom name="left_biceps" type="capsule" fromto="0 0 0 0 0.025 -0.275"
+                  size="0.057" rgba="0.78 0.81 0.83 1"/>
+            <body name="left_forearm" pos="0 0.025 -0.275">
+              <inertial pos="0 0.009 -0.1225" mass="0.56" diaginertia="0.0033 0.0033 0.00052"/>
+              <joint name="left_elbow" axis="0 1 0" range="0 2.35" damping="0.9"/>
+              <geom name="left_elbow_cap" class="joint_visual" type="sphere" size="0.061"/>
+              <geom name="left_forearm_shell" type="capsule" fromto="0 0 0 0 0.018 -0.245"
+                    size="0.048" rgba="0.86 0.88 0.89 1"/>
+              <body name="left_hand" pos="0 0.018 -0.245">
+                <inertial pos="0.026 0 -0.038" mass="0.20" diaginertia="0.00032 0.00040 0.00027"/>
+                <joint name="left_wrist_yaw" axis="0 0 1" range="-0.85 0.85" damping="0.35" armature="0.006"/>
+                <geom name="left_wrist_cap" class="joint_visual" type="sphere" size="0.042"/>
+                <geom name="left_palm" type="ellipsoid" pos="0.026 0 -0.038"
+                      size="0.066 0.049 0.075" rgba="0.86 0.88 0.89 1"/>
+              </body>
+            </body>
+          </body>
+          <body name="right_upper_arm" pos="0 -0.185 0.145">
+            <inertial pos="0 -0.0125 -0.1375" mass="0.78" diaginertia="0.0069 0.0069 0.0012"/>
+            <joint name="right_shoulder_pitch" axis="0 1 0" range="-2.1 1.9" damping="1.1"/>
+            <joint name="right_shoulder_roll" axis="1 0 0" range="-1.45 1.45" damping="1.1"/>
+            <geom name="right_shoulder_cap" class="joint_visual" type="ellipsoid"
+                  size="0.092 0.092 0.095"/>
+            <geom name="right_biceps" type="capsule" fromto="0 0 0 0 -0.025 -0.275"
+                  size="0.057" rgba="0.78 0.81 0.83 1"/>
+            <body name="right_forearm" pos="0 -0.025 -0.275">
+              <inertial pos="0 -0.009 -0.1225" mass="0.56" diaginertia="0.0033 0.0033 0.00052"/>
+              <joint name="right_elbow" axis="0 1 0" range="0 2.35" damping="0.9"/>
+              <geom name="right_elbow_cap" class="joint_visual" type="sphere" size="0.061"/>
+              <geom name="right_forearm_shell" type="capsule" fromto="0 0 0 0 -0.018 -0.245"
+                    size="0.048" rgba="0.86 0.88 0.89 1"/>
+              <body name="right_hand" pos="0 -0.018 -0.245">
+                <inertial pos="0.026 0 -0.038" mass="0.20" diaginertia="0.00032 0.00040 0.00027"/>
+                <joint name="right_wrist_yaw" axis="0 0 1" range="-0.85 0.85" damping="0.35" armature="0.006"/>
+                <geom name="right_wrist_cap" class="joint_visual" type="sphere" size="0.042"/>
+                <geom name="right_palm" type="ellipsoid" pos="0.026 0 -0.038"
+                      size="0.066 0.049 0.075" rgba="0.86 0.88 0.89 1"/>
+              </body>
+            </body>
           </body>
         </body>
       </body>
-      <body name="right_thigh" pos="0 -0.13 -0.20">
-        <joint name="right_hip" axis="0 1 0" range="-1.8 1.8"/>
-        <geom type="capsule" fromto="0 0 0 0 0 -0.24" size="0.065" mass="1.3"/>
-        <body name="right_shin" pos="0 0 -0.24">
-          <joint name="right_knee" axis="0 1 0" range="-0.1 2.3"/>
-          <geom type="capsule" fromto="0 0 0 0 0 -0.23" size="0.045" mass="0.9" rgba="0.18 0.44 0.75 1"/>
-          <body name="right_foot" pos="0.07 0 -0.23">
-            <joint name="right_ankle" axis="0 1 0" range="-0.8 0.8"/>
-            <geom type="box" pos="0.055 0 -0.025" size="0.12 0.055 0.035" mass="0.35" rgba="0.12 0.36 0.67 1"/>
+
+      <!-- Caderas yaw/roll/pitch, rodillas flexibles y tobillos pitch/roll. -->
+      <body name="left_thigh" pos="0 0.098 -0.082">
+        <inertial pos="0 0 -0.16" mass="1.85" diaginertia="0.0198 0.0198 0.0040"/>
+        <joint name="left_hip_yaw" axis="0 0 1" range="-0.60 0.60" damping="2.0"/>
+        <joint name="left_hip_roll" axis="1 0 0" range="-0.48 0.48" damping="2.0"/>
+        <joint name="left_hip_pitch" axis="0 1 0" range="-1.65 1.15" damping="2.0"/>
+        <geom name="left_hip_cap" class="joint_visual" type="sphere" size="0.076"/>
+        <geom name="left_thigh_shell" type="capsule" fromto="0 0 0 0 0 -0.32"
+              size="0.074" rgba="0.78 0.81 0.83 1"/>
+        <body name="left_shin" pos="0 0 -0.32">
+          <inertial pos="0 0 -0.155" mass="1.30" diaginertia="0.0118 0.0118 0.0014"/>
+          <joint name="left_knee" axis="0 1 0" range="0 2.35" damping="1.7"/>
+          <geom name="left_knee_cap" class="joint_visual" type="sphere" size="0.067"/>
+          <geom name="left_shin_shell" type="capsule" fromto="0 0 0 0 0 -0.31"
+                size="0.052" rgba="0.84 0.86 0.88 1"/>
+          <body name="left_foot" pos="0 0 -0.31">
+            <inertial pos="0 0 -0.035" mass="0.48" diaginertia="0.0008 0.0029 0.0031"/>
+            <joint name="left_ankle_pitch" axis="0 1 0" range="-0.78 0.62" damping="1.0"/>
+            <joint name="left_ankle_roll" axis="1 0 0" range="-0.34 0.34" damping="1.0"/>
+            <geom name="left_ankle_cap" class="joint_visual" type="sphere" size="0.052"/>
+            <geom name="left_foot_contact" class="foot_contact" type="ellipsoid"
+                  pos="0 0 -0.035" size="0.165 0.071 0.055"
+                  rgba="0.67 0.70 0.73 1"/>
           </body>
         </body>
       </body>
-      <!-- Brazos articulados para que la política pueda recogerlos al girar. -->
-      <body name="left_arm" pos="0 0.16 0.13">
-        <joint name="left_shoulder" axis="0 1 0" range="-2.5 2.5"/>
-        <geom type="capsule" fromto="0 0 0 0 0.03 -0.25" size="0.045" mass="0.65"/>
-      </body>
-      <body name="right_arm" pos="0 -0.16 0.13">
-        <joint name="right_shoulder" axis="0 1 0" range="-2.5 2.5"/>
-        <geom type="capsule" fromto="0 0 0 0 -0.03 -0.25" size="0.045" mass="0.65"/>
+      <body name="right_thigh" pos="0 -0.098 -0.082">
+        <inertial pos="0 0 -0.16" mass="1.85" diaginertia="0.0198 0.0198 0.0040"/>
+        <joint name="right_hip_yaw" axis="0 0 1" range="-0.60 0.60" damping="2.0"/>
+        <joint name="right_hip_roll" axis="1 0 0" range="-0.48 0.48" damping="2.0"/>
+        <joint name="right_hip_pitch" axis="0 1 0" range="-1.65 1.15" damping="2.0"/>
+        <geom name="right_hip_cap" class="joint_visual" type="sphere" size="0.076"/>
+        <geom name="right_thigh_shell" type="capsule" fromto="0 0 0 0 0 -0.32"
+              size="0.074" rgba="0.78 0.81 0.83 1"/>
+        <body name="right_shin" pos="0 0 -0.32">
+          <inertial pos="0 0 -0.155" mass="1.30" diaginertia="0.0118 0.0118 0.0014"/>
+          <joint name="right_knee" axis="0 1 0" range="0 2.35" damping="1.7"/>
+          <geom name="right_knee_cap" class="joint_visual" type="sphere" size="0.067"/>
+          <geom name="right_shin_shell" type="capsule" fromto="0 0 0 0 0 -0.31"
+                size="0.052" rgba="0.84 0.86 0.88 1"/>
+          <body name="right_foot" pos="0 0 -0.31">
+            <inertial pos="0 0 -0.035" mass="0.48" diaginertia="0.0008 0.0029 0.0031"/>
+            <joint name="right_ankle_pitch" axis="0 1 0" range="-0.78 0.62" damping="1.0"/>
+            <joint name="right_ankle_roll" axis="1 0 0" range="-0.34 0.34" damping="1.0"/>
+            <geom name="right_ankle_cap" class="joint_visual" type="sphere" size="0.052"/>
+            <geom name="right_foot_contact" class="foot_contact" type="ellipsoid"
+                  pos="0 0 -0.035" size="0.165 0.071 0.055"
+                  rgba="0.67 0.70 0.73 1"/>
+          </body>
+        </body>
       </body>
     </body>
   </worldbody>
-  <!-- Ocho motores de torque: caderas, rodillas, tobillos y hombros. -->
+
+  <!-- Evita contactos indeseados donde cubiertas anatómicas se solapan. -->
+  <contact>
+    <exclude body1="pelvis" body2="waist"/>
+    <exclude body1="waist" body2="chest"/>
+    <exclude body1="chest" body2="neck"/>
+    <exclude body1="chest" body2="left_upper_arm"/>
+    <exclude body1="chest" body2="right_upper_arm"/>
+    <exclude body1="pelvis" body2="left_thigh"/>
+    <exclude body1="pelvis" body2="right_thigh"/>
+  </contact>
+
+  <!-- Mapeo explícito y ordenado de los 27 ejes controlados a torque. -->
   <actuator>
-    <motor joint="left_hip" gear="1"/><motor joint="right_hip" gear="1"/>
-    <motor joint="left_knee" gear="1"/><motor joint="right_knee" gear="1"/>
-    <motor joint="left_ankle" gear="1"/><motor joint="right_ankle" gear="1"/>
-    <motor joint="left_shoulder" gear="1"/><motor joint="right_shoulder" gear="1"/>
+    <motor name="motor_waist_yaw" joint="waist_yaw" ctrlrange="-25 25"/>
+    <motor name="motor_waist_pitch" joint="waist_pitch" ctrlrange="-30 30"/>
+    <motor name="motor_waist_roll" joint="waist_roll" ctrlrange="-25 25"/>
+    <motor name="motor_chest_pitch" joint="chest_pitch" ctrlrange="-32 32"/>
+    <motor name="motor_chest_roll" joint="chest_roll" ctrlrange="-28 28"/>
+    <motor name="motor_neck_yaw" joint="neck_yaw" ctrlrange="-5 5"/>
+    <motor name="motor_neck_pitch" joint="neck_pitch" ctrlrange="-5 5"/>
+    <motor name="motor_left_shoulder_pitch" joint="left_shoulder_pitch" ctrlrange="-20 20"/>
+    <motor name="motor_left_shoulder_roll" joint="left_shoulder_roll" ctrlrange="-18 18"/>
+    <motor name="motor_left_elbow" joint="left_elbow" ctrlrange="-15 15"/>
+    <motor name="motor_left_wrist_yaw" joint="left_wrist_yaw" ctrlrange="-5 5"/>
+    <motor name="motor_right_shoulder_pitch" joint="right_shoulder_pitch" ctrlrange="-20 20"/>
+    <motor name="motor_right_shoulder_roll" joint="right_shoulder_roll" ctrlrange="-18 18"/>
+    <motor name="motor_right_elbow" joint="right_elbow" ctrlrange="-15 15"/>
+    <motor name="motor_right_wrist_yaw" joint="right_wrist_yaw" ctrlrange="-5 5"/>
+    <motor name="motor_left_hip_yaw" joint="left_hip_yaw" ctrlrange="-35 35"/>
+    <motor name="motor_left_hip_roll" joint="left_hip_roll" ctrlrange="-40 40"/>
+    <motor name="motor_left_hip_pitch" joint="left_hip_pitch" ctrlrange="-45 45"/>
+    <motor name="motor_left_knee" joint="left_knee" ctrlrange="-38 38"/>
+    <motor name="motor_left_ankle_pitch" joint="left_ankle_pitch" ctrlrange="-22 22"/>
+    <motor name="motor_left_ankle_roll" joint="left_ankle_roll" ctrlrange="-16 16"/>
+    <motor name="motor_right_hip_yaw" joint="right_hip_yaw" ctrlrange="-35 35"/>
+    <motor name="motor_right_hip_roll" joint="right_hip_roll" ctrlrange="-40 40"/>
+    <motor name="motor_right_hip_pitch" joint="right_hip_pitch" ctrlrange="-45 45"/>
+    <motor name="motor_right_knee" joint="right_knee" ctrlrange="-38 38"/>
+    <motor name="motor_right_ankle_pitch" joint="right_ankle_pitch" ctrlrange="-22 22"/>
+    <motor name="motor_right_ankle_roll" joint="right_ankle_roll" ctrlrange="-16 16"/>
   </actuator>
 </mujoco>
