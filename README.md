@@ -1,3 +1,7 @@
+<div align="center">
+ <img alt="Humanoide minimalista en la pose inicial" src="docs/humanoid-preview.png" />
+</div>
+
 # Robot voltereta
 
 Proyecto de simulación y aprendizaje por refuerzo para un humanoide que intenta dar una voltereta frontal y aterrizar de pie. MuJoCo calcula la física; el entorno de control está en C++; PPO y la política usan Python y PyTorch.
@@ -81,6 +85,7 @@ El nuevo modelo tiene 27 motores y produce observaciones de 67 valores. El check
 
 El controlador observa `qpos + qvel` (67 valores, incluida la pose libre del torso) y aplica torques acotados a 27 motores. El MJCF utiliza 19,65 kg de masa total distribuida entre pelvis, torso, cabeza y extremidades, con inercia explícita por segmento. Cápsulas, elipsoides y esferas redondean el contorno; los pies elipsoidales llegan al plano del suelo en la pose inicial. Los contactos estructurales entre pelvis, cintura, pecho y hombros se excluyen para evitar penetraciones internas. La recompensa favorece rotación frontal, mantener altura y terminar cerca de una rotación completa con el torso erguido. Una caída por altura fuera del intervalo permitido, un estado numérico no finito, un aterrizaje reconocido o alcanzar cinco segundos terminan el episodio. El código verifica formas y valores finitos antes y después de cruzar la interfaz C++/Python.
 
-Vista renderizada desde el MJCF inicial:
+Captura del humanoide en el visor de MuJoCo:
 
-![Humanoide minimalista en la pose inicial](docs/humanoid-preview.png)
+---
+![Humanoide minimalista en el visor de MuJoCo](assets/screenshots/screenshot.png)
